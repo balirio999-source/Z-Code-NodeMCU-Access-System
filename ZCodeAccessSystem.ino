@@ -49,8 +49,8 @@
 // ============================================================
 // Configuración WiFi AP
 // ============================================================
-const char AP_SSID[] = "ZCODE-MCU-v01";
-const char AP_PASS[] = "12345678AZ";
+#define AP_SSID     "ZCODE-MCU-v01"
+#define AP_PASS     "12345678AZ"
 
 // ============================================================
 // Constantes de tiempo (milisegundos)
@@ -550,8 +550,7 @@ void deactivateRelay() {
 void activateWiFiAP() {
   WiFi.mode(WIFI_AP);
   WiFi.softAP(AP_SSID, AP_PASS);
-  Serial.print(F("WiFi AP: "));
-  Serial.println(AP_SSID);
+  Serial.printf_P(PSTR("WiFi AP: %s\n"), AP_SSID);
   Serial.print(F("  IP: "));
   Serial.println(WiFi.softAPIP());
 }

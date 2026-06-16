@@ -2,22 +2,32 @@
  * Z-Code NodeMCU Access System
  * =============================
  * Sistema de control de acceso con RFID-RC522, OLED SSD1306,
- * relay y punto de acceso WiFi en NodeMCU ESP8266.
+ * relé y punto de acceso WiFi en NodeMCU ESP8266.
  *
- * Conexiones:
- *   RFID-RC522    NodeMCU    GPIO     Función
- *   SDA/SS        D8         GPIO15   Selección SPI
- *   SCK           D1         GPIO5    Reloj SPI (software)
- *   MOSI          D7         GPIO13   Datos hacia RC522
- *   MISO          D2         GPIO4    Datos desde RC522
- *   RST           D0         GPIO16   Reset del RC522
- *   3.3V          3V3        -        Alimentación
- *   GND           GND        -        Tierra común
+ * Conexiones confirmadas por el usuario:
+ *   OLED SSD1306 (integrada HELTEC WiFi Kit 8)
+ *     SDA = GPIO14 (D5)
+ *     SCL = GPIO12 (D6)
+ *     Dirección I2C: 0x3C (probar también 0x3D)
+ *     Resolución: 128x32
  *
- *   Módulo-Relé   NodeMCU    GPIO     Función
- *   IN/S          D4         GPIO2    Señal de control
- *   VCC           VIN/5V     -        Alimentación
- *   GND           GND        -        Tierra común
+ *   RFID-RC522 (Software SPI)
+ *     SDA/SS  = D8  = GPIO15  (Selección SPI)
+ *     SCK     = D1  = GPIO5   (Reloj SPI software)
+ *     MOSI    = D7  = GPIO13  (Datos hacia RC522)
+ *     MISO    = D2  = GPIO4   (Datos desde RC522)
+ *     RST     = D0  = GPIO16  (Reset del RC522)
+ *     3.3V    = 3V3           (Alimentación)
+ *     GND     = GND           (Tierra común)
+ *
+ *   Módulo Relé
+ *     IN/S    = D4  = GPIO2   (Señal de control)
+ *     VCC     = VIN/5V o 3V3  (Alimentación según el módulo)
+ *     GND     = GND           (Tierra común)
+ *
+ * NOTA: GPIO2 (D4) controla tanto el relé como el LED azul integrado.
+ *       El LED azul está activo en LOW, el relé en HIGH.
+ *       En idle (relé OFF=LOW) el LED azul estará ENCENDIDO.
  *
  * Librerías requeridas (instalar desde Gestor de Librerías):
  *   - MFRC522 (by GithubCommunity)
@@ -32,19 +42,25 @@
 #include <Adafruit_SSD1306.h>
 
 // ============================================================
-// Configuración de pines
+// Configuración de pines - CONFIRMADOS POR USUARIO
 // ============================================================
+// RFID-RC522 (Software SPI - 5 argumentos en constructor)
 #define PIN_RFID_SS    15   // GPIO15 (D8)  - SDA/SS del RC522
 #define PIN_RFID_RST   16   // GPIO16 (D0)  - RST del RC522
+#define PIN_RFID_MOSI  13   // GPIO13 (D7)  - MOSI
+#define PIN_RFID_MISO   4   // GPIO4  (D2)  - MISO
+#define PIN_RFID_SCK    5   // GPIO5  (D1)  - SCK
+
+// Relé (GPIO2 = D4 - comparte con LED azul integrado)
 #define PIN_RELAY       2   // GPIO2  (D4)  - Control del relé
 
-// ============================================================
-// Configuración OLED SSD1306
-// ============================================================
+// OLED SSD1306 (I2C - pines específicos HELTEC)
+#define OLED_SDA       14   // GPIO14 (D5)  - SDA
+#define OLED_SCL       12   // GPIO12 (D6)  - SCL
 #define OLED_WIDTH     128
-#define OLED_HEIGHT     64
-#define OLED_ADDR     0x3C
-#define OLED_RST       -1   // Reset compartido con el MCU
+#define OLED_HEIGHT     32   // HELTEC WiFi Kit 8 es 128x32
+#define OLED_ADDR      0x3C  // Probar 0x3D si no funciona
+#define OLED_RST       -1    // Reset compartido con MCU
 
 // ============================================================
 // Configuración WiFi AP
@@ -76,8 +92,11 @@
 // ============================================================
 // Variables globales
 // ============================================================
+// OLED - inicializar con pines I2C específicos
 Adafruit_SSD1306 display(OLED_WIDTH, OLED_HEIGHT, &Wire, OLED_RST);
-MFRC522 mfrc522(PIN_RFID_SS, PIN_RFID_RST);
+
+// RFID - constructor Software SPI (5 argumentos: SS, RST, MOSI, MISO, SCK)
+MFRC522 mfrc522(PIN_RFID_SS, PIN_RFID_RST, PIN_RFID_MOSI, PIN_RFID_MISO, PIN_RFID_SCK);
 MFRC522::MIFARE_Key key;
 
 // --- Máquina de estados del sistema ---
@@ -100,6 +119,7 @@ bool relayActive       = false;
 bool wifiActive        = false;
 bool statusPhaseOver   = false;  // true cuando pasaron los 10 s de "Tarjeta OK/NG"
 bool blinkVisible      = true;
+bool oledInitialized   = false;  // Flag para saber si OLED funciona
 
 // --- Contadores ---
 uint8_t failedCount    = 0;
@@ -140,11 +160,15 @@ void refreshDisplay();
 void setup() {
   Serial.begin(115200);
   Serial.println();
-  Serial.println(F("Z-Code NodeMCU Access System v1.0"));
+  Serial.println(F("Z-Code NodeMCU Access System v1.1"));
+  Serial.println(F("HELTEC WiFi Kit 8 + RFID-RC522"));
 
-  // Pin del relé
+  // Pin del relé (GPIO2 = LED azul integrado)
+  // LED azul: activo LOW (LOW=ON, HIGH=OFF)
+  // Relé: asumimos activo HIGH (HIGH=ON, LOW=OFF)
+  // En idle: relé OFF = LOW = LED azul ON
   pinMode(PIN_RELAY, OUTPUT);
-  digitalWrite(PIN_RELAY, LOW);
+  digitalWrite(PIN_RELAY, LOW);  // Relé OFF, LED azul ON
 
   // Inicializar periféricos
   initOLED();
@@ -181,31 +205,55 @@ void loop() {
 }
 
 // ============================================================
-// Inicialización del OLED SSD1306
+// Inicialización del OLED SSD1306 (HELTEC WiFi Kit 8)
 // ============================================================
 void initOLED() {
-  Wire.begin();  // SDA=GPIO4(D2), SCL=GPIO5(D1)
+  // IMPORTANTE: Wire.begin(SDA, SCL) con pines específicos
+  // para HELTEC WiFi Kit 8: SDA=GPIO14, SCL=GPIO12
+  Wire.begin(OLED_SDA, OLED_SCL);
+  
+  // Probar dirección 0x3C primero, luego 0x3D
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
-    Serial.println(F("Error: OLED no detectado"));
-    while (true);
+    Serial.print(F("OLED no detectado en 0x"));
+    Serial.print(OLED_ADDR, HEX);
+    Serial.println(F(", probando 0x3D..."));
+    if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3D)) {
+      Serial.println(F("ERROR: OLED no detectado en 0x3C ni 0x3D"));
+      Serial.println(F("Continuando SIN pantalla OLED..."));
+      oledInitialized = false;
+      return;
+    }
+    Serial.println(F("OLED detectado en 0x3D"));
+  } else {
+    Serial.println(F("OLED detectado en 0x3C"));
   }
+  
+  oledInitialized = true;
   display.clearDisplay();
   display.display();
-  Serial.println(F("OLED SSD1306 inicializado"));
+  Serial.println(F("OLED SSD1306 inicializado (128x32)"));
 }
 
 // ============================================================
-// Inicialización del lector RFID-RC522
+// Inicialización del lector RFID-RC522 (Software SPI)
 // ============================================================
 void initRFID() {
-  SPI.begin();
+  // IMPORTANTE: NO llamar SPI.begin() aquí.
+  // El constructor MFRC522 de 5 argumentos usa Software SPI
+  // y maneja los pines directamente sin usar el periférico Hardware SPI.
+  
   mfrc522.PCD_Init();
-  delay(4);
-  byte ver = mfrc522.PCD_ReadRegister(MFRC522::VersionReg);
-  Serial.print(F("RC522 Version: 0x"));
-  Serial.println(ver, HEX);
-  if (ver == 0x00 || ver == 0xFF) {
-    Serial.println(F("Warning: RC522 no detectado"));
+  delay(4);  // Tiempo de estabilización del RC522
+
+  // Verificar conexión del lector
+  byte version = mfrc522.PCD_ReadRegister(MFRC522::VersionReg);
+  Serial.print(F("RFID RC522 Version: 0x"));
+  Serial.println(version, HEX);
+  if ((version == 0x00) || (version == 0xFF)) {
+    Serial.println(F("WARNING: RC522 no detectado o comunicacion fallida"));
+    Serial.println(F("Verificar cableado: SS=D8, SCK=D1, MOSI=D7, MISO=D2, RST=D0"));
+  } else {
+    Serial.println(F("RFID RC522 inicializado (Software SPI)"));
   }
 }
 
@@ -213,6 +261,8 @@ void initRFID() {
 // Pantalla de estado IDLE
 // ============================================================
 void showIdleScreen() {
+  if (!oledInitialized) return;
+  
   display.clearDisplay();
   renderLine1(AP_SSID " OFF", true);
   setLine2("Acercar Tarjeta");
@@ -231,6 +281,8 @@ void setLine2(const char* text) {
 // Refrescar pantalla completa (línea 1 + línea 2)
 // ============================================================
 void refreshDisplay() {
+  if (!oledInitialized) return;
+  
   display.clearDisplay();
 
   // --- Línea 1 ---
@@ -289,7 +341,7 @@ void renderLine1(const char* text, bool resetScroll) {
 // Actualizar desplazamiento de línea 1
 // ============================================================
 void updateScrolling() {
-  if (!needsScrolling) return;
+  if (!oledInitialized || !needsScrolling) return;
 
   unsigned long now = millis();
   if (now - scrollLast < SCROLL_INTERVAL_MS) return;
@@ -535,13 +587,13 @@ uint32_t readBlock4(MFRC522::Uid uid) {
 // Control del relé
 // ============================================================
 void activateRelay() {
-  digitalWrite(PIN_RELAY, HIGH);
-  Serial.println(F("Relé ON"));
+  digitalWrite(PIN_RELAY, HIGH);  // Relé ON (GPIO2=HIGH -> LED azul OFF)
+  Serial.println(F("Relé ON (LED azul OFF)"));
 }
 
 void deactivateRelay() {
-  digitalWrite(PIN_RELAY, LOW);
-  Serial.println(F("Relé OFF"));
+  digitalWrite(PIN_RELAY, LOW);   // Relé OFF (GPIO2=LOW -> LED azul ON)
+  Serial.println(F("Relé OFF (LED azul ON)"));
 }
 
 // ============================================================
@@ -550,7 +602,8 @@ void deactivateRelay() {
 void activateWiFiAP() {
   WiFi.mode(WIFI_AP);
   WiFi.softAP(AP_SSID, AP_PASS);
-  Serial.printf_P(PSTR("WiFi AP: %s\n"), AP_SSID);
+  Serial.print(F("WiFi AP: "));
+  Serial.println(AP_SSID);
   Serial.print(F("  IP: "));
   Serial.println(WiFi.softAPIP());
 }

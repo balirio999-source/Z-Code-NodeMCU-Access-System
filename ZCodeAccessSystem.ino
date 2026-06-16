@@ -95,8 +95,9 @@
 // OLED - inicializar con pines I2C específicos
 Adafruit_SSD1306 display(OLED_WIDTH, OLED_HEIGHT, &Wire, OLED_RST);
 
-// RFID - constructor Software SPI (5 argumentos: SS, RST, MOSI, MISO, SCK)
-MFRC522 mfrc522(PIN_RFID_SS, PIN_RFID_RST, PIN_RFID_MOSI, PIN_RFID_MISO, PIN_RFID_SCK);
+// RFID - constructor estándar (2 argumentos: SS, RST)
+// Los pines MOSI, MISO, SCK se configuran vía SPI.pins() en initRFID()
+MFRC522 mfrc522(PIN_RFID_SS, PIN_RFID_RST);
 MFRC522::MIFARE_Key key;
 
 // --- Máquina de estados del sistema ---
@@ -235,13 +236,17 @@ void initOLED() {
 }
 
 // ============================================================
-// Inicialización del lector RFID-RC522 (Software SPI)
+// Inicialización del lector RFID-RC522 (Software SPI en ESP8266)
 // ============================================================
 void initRFID() {
-  // IMPORTANTE: NO llamar SPI.begin() aquí.
-  // El constructor MFRC522 de 5 argumentos usa Software SPI
-  // y maneja los pines directamente sin usar el periférico Hardware SPI.
+  // Configurar pines SPI personalizados ANTES de PCD_Init()
+  // ESP8266 SPI.pins(SCK, MISO, MOSI, SS) define pines para SPI.begin()
+  // Esto permite usar Software SPI en pines arbitrarios (no hardware SPI)
+  SPI.pins(PIN_RFID_SCK, PIN_RFID_MISO, PIN_RFID_MOSI, PIN_RFID_SS);
+  SPI.begin();  // Inicializa SPI con los pines configurados arriba
   
+  // Ahora inicializar MFRC522 - internamente llamará SPI.begin() de nuevo
+  // pero respetará los pines ya configurados por SPI.pins()
   mfrc522.PCD_Init();
   delay(4);  // Tiempo de estabilización del RC522
 
@@ -253,7 +258,7 @@ void initRFID() {
     Serial.println(F("WARNING: RC522 no detectado o comunicacion fallida"));
     Serial.println(F("Verificar cableado: SS=D8, SCK=D1, MOSI=D7, MISO=D2, RST=D0"));
   } else {
-    Serial.println(F("RFID RC522 inicializado (Software SPI)"));
+    Serial.println(F("RFID RC522 inicializado (Software SPI pines personalizados)"));
   }
 }
 
